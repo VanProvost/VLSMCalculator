@@ -1,0 +1,2 @@
+C:\Users\vanpr\OneDrive\Documents\GitHub\NetKit\VLSMCalculator\bin\Release\net9.0-windows\win-x64\publish\VLSMCalculator.pdb
+C:\Users\vanpr\OneDrive\Documents\GitHub\NetKit\VLSMCalculator\bin\Release\net9.0-windows\win-x64\publish\VLSMCalculator.exe
