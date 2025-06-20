@@ -57,23 +57,30 @@ public partial class MainWindow : Window
         var networkInput = FindName("NetworkInput") as TextBox;
         var hostRequirementsInput = FindName("HostRequirementsInput") as TextBox;
         var networkDiagram = FindName("NetworkDiagramCanvas") as VLSMCalculator.Controls.NetworkDiagram;
+        var subnetTree = FindName("SubnetTreeDisplay") as VLSMCalculator.Controls.SubnetTreeControl;
         
         if (networkInput != null) networkInput.Text = "192.168.1.0/24";
         if (hostRequirementsInput != null) hostRequirementsInput.Text = "50,25,10,5";
         HideError();
-        
-        // Clear diagram completely
+          // Clear diagram completely
         _subnets.Clear();
         if (networkDiagram != null)
         {
             networkDiagram.Subnets = null;
-            networkDiagram.BaseNetwork = "";
+            // Don't clear BaseNetwork - keep it for reference
+            // networkDiagram.BaseNetwork = "";
             
             // Use Dispatcher to ensure UI updates happen properly
             Dispatcher.BeginInvoke(() =>
             {
                 networkDiagram.Subnets = new ObservableCollection<SubnetInfo>();
             }, DispatcherPriority.Render);
+        }
+        
+        // Clear subnet tree
+        if (subnetTree != null)
+        {
+            subnetTree.ClearSubnetTree();
         }
         
         // Show placeholder
@@ -327,8 +334,7 @@ public partial class MainWindow : Window
                     // Create new ObservableCollection for diagram
                     var newSubnets = new ObservableCollection<SubnetInfo>(subnets);
                     _subnets = newSubnets;
-                    
-                    // Update network diagram
+                      // Update network diagram
                     var networkDiagram = FindName("NetworkDiagramCanvas") as VLSMCalculator.Controls.NetworkDiagram;
                     if (networkDiagram != null)
                     {
@@ -336,12 +342,24 @@ public partial class MainWindow : Window
                         networkDiagram.BaseNetwork = "";
                         
                         // Use another dispatcher call to ensure proper refresh
-                        Dispatcher.BeginInvoke(() =>
-                        {
+                        Dispatcher.BeginInvoke(() =>                        {
                             if (sequenceNumber == _calculationSequence) // Check again
                             {
                                 networkDiagram.Subnets = newSubnets;
                                 networkDiagram.BaseNetwork = networkInput;
+                            }
+                        }, DispatcherPriority.Render);
+                    }
+                    
+                    // Update subnet tree
+                    var subnetTree = FindName("SubnetTreeDisplay") as VLSMCalculator.Controls.SubnetTreeControl;
+                    if (subnetTree != null)
+                    {
+                        Dispatcher.BeginInvoke(() =>
+                        {
+                            if (sequenceNumber == _calculationSequence) // Check again
+                            {
+                                subnetTree.UpdateSubnetTree(networkInput, subnets);
                             }
                         }, DispatcherPriority.Render);
                     }

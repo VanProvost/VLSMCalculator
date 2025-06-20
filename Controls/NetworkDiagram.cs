@@ -6,13 +6,12 @@ using System.Windows.Media;
 using System.Windows.Media.Animation;
 using System.Windows.Shapes;
 using VLSMCalculator.Models;
-using System.Threading;
-using System.Threading.Tasks;
 
 namespace VLSMCalculator.Controls;
 
 public class NetworkDiagram : Canvas
 {
+    #region Dependency Properties
     public static readonly DependencyProperty SubnetsProperty =
         DependencyProperty.Register(nameof(Subnets), typeof(ObservableCollection<SubnetInfo>), 
             typeof(NetworkDiagram), new PropertyMetadata(null, OnSubnetsChanged));
@@ -20,32 +19,6 @@ public class NetworkDiagram : Canvas
     public static readonly DependencyProperty BaseNetworkProperty =
         DependencyProperty.Register(nameof(BaseNetwork), typeof(string), 
             typeof(NetworkDiagram), new PropertyMetadata("", OnBaseNetworkChanged));
-
-    // Interactive state tracking
-    private Border? _hoveredSubnet;
-    private bool _isDragging;
-    private Point _dragStartPoint;
-    private Border? _draggedSubnet;
-    private readonly List<SubnetNodeInfo> _subnetNodes = new();
-    private readonly Dictionary<Border, Line> _connectionLines = new();
-    private System.Windows.Threading.DispatcherTimer? _forceTimer;
-    
-    // Race condition handling
-    private bool _isDrawing;
-    private int _drawRequestSequence;
-    private readonly object _drawLock = new();
-    private System.Threading.CancellationTokenSource? _currentDrawCancellation;
-    
-    // Performance optimizations
-    private readonly Dictionary<Border, Storyboard> _activeAnimations = new();
-    private readonly HashSet<Border> _animatingNodes = new();
-    private bool _isDecelerationActive = false;
-    private readonly object _animationLock = new();
-    
-    // Performance thresholds and caching
-    private readonly int _performanceThreshold = 15; // Switch to high perf mode above this count
-    private readonly Dictionary<string, SolidColorBrush> _cachedBrushes = new();
-    private bool _isHighPerformanceMode = false;
 
     public ObservableCollection<SubnetInfo>? Subnets
     {
@@ -56,64 +29,68 @@ public class NetworkDiagram : Canvas
     public string BaseNetwork
     {
         get => (string)GetValue(BaseNetworkProperty);
-        set => SetValue(BaseNetworkProperty, value);
-    }
+        set => SetValue(BaseNetworkProperty, value);    }
+    #endregion
+    
+    #region Fields & Types
+    private Border? _hoveredSubnet, _draggedSubnet;
+    private bool _isDragging, _isDrawing, _isDecelerationActive, _isHighPerformanceMode;
+    private Point _dragStartPoint;
+    private int _drawRequestSequence;
+    private readonly List<SubnetNodeInfo> _subnetNodes = new();
+    private readonly Dictionary<Border, Line> _connectionLines = new();
+    private readonly Dictionary<Border, Storyboard> _activeAnimations = new();
+    private readonly Dictionary<string, SolidColorBrush> _cachedBrushes = new();
+    private readonly object _drawLock = new(), _animationLock = new();
+    private System.Threading.CancellationTokenSource? _currentDrawCancellation;    private const int PerformanceThreshold = 15;
+      // Enhanced responsive design constants
+    private const double MinFontSize = 10.0;
+    private const double MaxFontSize = 18.0;
+    private const double MinContainerWidth = 170.0;  // Increased from 140.0
+    private const double MaxContainerWidth = 300.0;  // Increased from 260.0  
+    private const double MinContainerHeight = 120.0; // Increased from 80.0
+    private const double MaxContainerHeight = 180.0; // Increased from 150.0
+    private const double BaseCanvasSize = 800.0; // Reference size for scaling
+    private const double DefaultTextPadding = 20.0; // Increased from 16.0
 
-    private class SubnetNodeInfo
+    private record SubnetNodeInfo
     {
-        public Border Container { get; set; } = null!;
-        public SubnetInfo Subnet { get; set; } = null!;
+        public Border Container { get; init; } = null!;
+        public SubnetInfo Subnet { get; init; } = null!;
         public Point Position { get; set; }
         public Point Velocity { get; set; }
         public bool IsDecelerating { get; set; }
         public DateTime LastMoveTime { get; set; }
     }
+    #endregion
 
-    private static void OnSubnetsChanged(DependencyObject d, DependencyPropertyChangedEventArgs e)
-    {
-        if (d is NetworkDiagram diagram)
-        {
-            diagram.RequestDrawWithRaceConditionHandling();
-        }
-    }
+    #region Event Handlers & Drawing
+    private static void OnSubnetsChanged(DependencyObject d, DependencyPropertyChangedEventArgs e) =>
+        ((NetworkDiagram)d).RequestDrawWithRaceConditionHandling();
 
-    private static void OnBaseNetworkChanged(DependencyObject d, DependencyPropertyChangedEventArgs e)
-    {
-        if (d is NetworkDiagram diagram)
-        {
-            diagram.RequestDrawWithRaceConditionHandling();
-        }
-    }
+    private static void OnBaseNetworkChanged(DependencyObject d, DependencyPropertyChangedEventArgs e) =>
+        ((NetworkDiagram)d).RequestDrawWithRaceConditionHandling();
 
     private void RequestDrawWithRaceConditionHandling()
     {
         lock (_drawLock)
         {
-            // Cancel any pending draw operation
             _currentDrawCancellation?.Cancel();
-            _currentDrawCancellation = new System.Threading.CancellationTokenSource();
+            _currentDrawCancellation = new();
             
             var currentSequence = ++_drawRequestSequence;
             var cancellationToken = _currentDrawCancellation.Token;
-
-            // Adaptive debounce delay based on network size for better performance
-            var debounceDelay = Subnets?.Count > _performanceThreshold ? 200 : 100;
+            var debounceDelay = Subnets?.Count > PerformanceThreshold ? 200 : 100;
             
             Dispatcher.BeginInvoke(async () =>
             {
                 try
                 {
                     await System.Threading.Tasks.Task.Delay(debounceDelay, cancellationToken);
-                    
-                    if (cancellationToken.IsCancellationRequested || currentSequence != _drawRequestSequence)
-                        return;
-
-                    DrawDiagram();
+                    if (!cancellationToken.IsCancellationRequested && currentSequence == _drawRequestSequence)
+                        DrawDiagram();
                 }
-                catch (System.Threading.Tasks.TaskCanceledException)
-                {
-                    // Expected when cancellation is requested
-                }
+                catch (System.Threading.Tasks.TaskCanceledException) { }
             }, System.Windows.Threading.DispatcherPriority.Background);
         }
     }
@@ -121,78 +98,51 @@ public class NetworkDiagram : Canvas
     protected override void OnRenderSizeChanged(SizeChangedInfo sizeInfo)
     {
         base.OnRenderSizeChanged(sizeInfo);
-        // Use enhanced race condition handling for size changes
-        if (ActualWidth > 0 && ActualHeight > 0)
-        {
-            RequestDrawWithRaceConditionHandling();
-        }
-    }
-
-    private void DrawDiagram()
+        if (ActualWidth > 0 && ActualHeight > 0) RequestDrawWithRaceConditionHandling();
+    }    private void DrawDiagram()
     {
         lock (_drawLock)
         {
             if (_isDrawing) return;
             _isDrawing = true;
-        }
-
-        try
-        {
-            // Determine performance mode based on network count
-            _isHighPerformanceMode = Subnets?.Count > _performanceThreshold;
+        }        try        {
+            // Debug information
+            System.Diagnostics.Debug.WriteLine($"DrawDiagram called: Subnets={Subnets?.Count ?? -1}, ActualWidth={ActualWidth}, ActualHeight={ActualHeight}, BaseNetwork='{BaseNetwork}'");
             
-            // Clean up existing animations before clearing
+            _isHighPerformanceMode = Subnets?.Count > PerformanceThreshold;
             CleanupAllAnimations();
             
-            // Clear existing children
             Children.Clear();
             _subnetNodes.Clear();
             _connectionLines.Clear();
-
-            // Stop force timer if running
-            StopDecelerationTimer();
-
-            // Validate that we have the necessary data and valid dimensions
-            if (Subnets == null || Subnets.Count == 0 || ActualWidth <= 0 || ActualHeight <= 0)
+            StopDecelerationTimer();            // Fix the null check - Subnets can be null or have 0 count
+            if (Subnets == null || Subnets.Count == 0 || ActualWidth <= 0 || ActualHeight <= 0 || string.IsNullOrEmpty(BaseNetwork))
             {
+                System.Diagnostics.Debug.WriteLine("DrawDiagram: Early return due to invalid state");
                 return;
             }
 
-            // Ensure BaseNetwork is not null
-            if (string.IsNullOrEmpty(BaseNetwork))
-            {
-                return;
-            }
-
-            // Optimize rendering settings based on network size
+            System.Diagnostics.Debug.WriteLine($"DrawDiagram: Proceeding with {Subnets.Count} subnets, HighPerformance={_isHighPerformanceMode}");
             OptimizeRenderingForNetworkSize();
 
-            // Use appropriate drawing method
             if (_isHighPerformanceMode)
-            {
                 DrawHighPerformanceNetworkDiagram();
-            }
             else
-            {
                 DrawModernNetworkDiagram();
-            }
+            
+            System.Diagnostics.Debug.WriteLine($"DrawDiagram: Completed drawing, Children.Count={Children.Count}");
         }
         catch (Exception ex)
         {
-            // Log error if needed, but don't crash the UI
             System.Diagnostics.Debug.WriteLine($"Error drawing network diagram: {ex.Message}");
         }
         finally
         {
-            lock (_drawLock)
-            {
-                _isDrawing = false;
-            }
+            lock (_drawLock) { _isDrawing = false; }
         }
     }
-
-    #region Performance Optimization Methods
     
+    #region Performance Optimization Methods
     private void CleanupAllAnimations()
     {
         lock (_animationLock)
@@ -203,19 +153,10 @@ public class NetworkDiagram : Canvas
                 kvp.Value.Remove();
             }
             _activeAnimations.Clear();
-            _animatingNodes.Clear();
         }
     }
-    
-    private void StopDecelerationTimer()
-    {
-        if (_forceTimer != null)
-        {
-            _forceTimer.Stop();
-            _forceTimer = null;
-        }
-        _isDecelerationActive = false;
-    }
+
+    private void StopDecelerationTimer() => _isDecelerationActive = false;
     
     private SolidColorBrush GetCachedBrush(Color color)
     {
@@ -223,7 +164,7 @@ public class NetworkDiagram : Canvas
         if (!_cachedBrushes.TryGetValue(key, out var brush))
         {
             brush = new SolidColorBrush(color);
-            brush.Freeze(); // Freeze for better performance
+            brush.Freeze();
             _cachedBrushes[key] = brush;
         }
         return brush;
@@ -231,51 +172,152 @@ public class NetworkDiagram : Canvas
     
     private void OptimizeRenderingForNetworkSize()
     {
-        // Enable hardware acceleration optimizations based on network size
         if (_isHighPerformanceMode)
         {
-            // For large networks, prioritize performance over visual quality
             RenderOptions.SetBitmapScalingMode(this, BitmapScalingMode.LowQuality);
             RenderOptions.SetEdgeMode(this, EdgeMode.Aliased);
             CacheMode = new BitmapCache { RenderAtScale = 0.8 };
         }
         else
         {
-            // For smaller networks, maintain high visual quality
             RenderOptions.SetBitmapScalingMode(this, BitmapScalingMode.HighQuality);
             RenderOptions.SetEdgeMode(this, EdgeMode.Unspecified);
             CacheMode = null;
-        }
+        }    }
+    #endregion
+    
+    #region Text Measurement and Responsive Utilities
+    
+    /// <summary>
+    /// Measures the actual size of text with the given parameters
+    /// </summary>
+    private Size MeasureTextSize(string text, double fontSize, FontFamily fontFamily, FontWeight fontWeight = default)
+    {
+        if (string.IsNullOrEmpty(text)) return new Size(0, 0);
+        
+        var formattedText = new FormattedText(
+            text,
+            System.Globalization.CultureInfo.CurrentCulture,
+            FlowDirection.LeftToRight,
+            new Typeface(fontFamily, FontStyles.Normal, fontWeight == default ? FontWeights.Normal : fontWeight, FontStretches.Normal),
+            fontSize,
+            Brushes.Black,
+            VisualTreeHelper.GetDpi(this).PixelsPerDip);
+            
+        return new Size(formattedText.Width, formattedText.Height);
+    }
+      /// <summary>
+    /// Calculates optimal font size based on canvas size and content count
+    /// </summary>
+    private double GetScaledFontSize(double baseFontSize, double canvasWidth, double canvasHeight)
+    {
+        var scaleFactor = Math.Min(canvasWidth, canvasHeight) / BaseCanvasSize;
+        var contentDensityFactor = Subnets?.Count > 0 ? Math.Max(0.9, 1.0 - (Subnets.Count - 5) * 0.02) : 1.0; // Reduce font size slightly for dense networks
+        var scaledSize = baseFontSize * Math.Max(0.75, Math.Min(1.4, scaleFactor)) * contentDensityFactor;
+        return Math.Max(MinFontSize, Math.Min(MaxFontSize, scaledSize));    }
+    
+    /// <summary>
+    /// Calculates optimal container size based on content and canvas dimensions
+    /// </summary>
+    private Size CalculateOptimalContainerSize(SubnetInfo subnet, double fontSize, FontFamily fontFamily)
+    {
+        // Use the actual font sizes that will be used in rendering
+        var primaryFontSize = fontSize; // Network text (bold)
+        var secondaryFontSize = GetScaledFontSize(11, ActualWidth, ActualHeight); // Hosts text
+        var tertiaryFontSize = GetScaledFontSize(10, ActualWidth, ActualHeight); // Required and range text
+        
+        // Measure all text content that will be displayed with actual font sizes
+        var networkSize = MeasureTextSize(subnet.Network, primaryFontSize, fontFamily, FontWeights.Bold);
+        var hostsSize = MeasureTextSize($"{subnet.UsableHosts} hosts", secondaryFontSize, fontFamily);
+        var requiredSize = MeasureTextSize($"Required: {subnet.RequiredHosts}", tertiaryFontSize, fontFamily);
+        var rangeSize = MeasureTextSize($"{subnet.FirstHost} - {subnet.LastHost}", tertiaryFontSize, fontFamily);
+          // Add extra safety margin for the range text since it's often the longest
+        var rangeSizeWithSafety = new Size(rangeSize.Width * 1.1, rangeSize.Height);
+          // Calculate required width with generous padding for readability  
+        var maxTextWidth = Math.Max(networkSize.Width, Math.Max(hostsSize.Width, Math.Max(requiredSize.Width, rangeSizeWithSafety.Width)));
+        
+        // Add extra margin for Consolas font which needs more horizontal space
+        var consolasAdjustment = fontFamily.Source.Contains("Consolas") ? 1.15 : 1.0;
+        var requiredWidth = (maxTextWidth * consolasAdjustment) + (DefaultTextPadding * 3.5); // Increased padding multiplier for better safety
+        
+        // Calculate required height with proper line spacing
+        var totalTextHeight = networkSize.Height + hostsSize.Height + requiredSize.Height + rangeSize.Height;
+        var lineSpacing = fontSize * 0.5; // Increased line spacing
+        var requiredHeight = totalTextHeight + (lineSpacing * 4) + (DefaultTextPadding * 2.0); // More vertical spacing
+        
+        // Apply scaling based on canvas size with better minimum thresholds
+        var scaleFactor = Math.Min(ActualWidth, ActualHeight) / BaseCanvasSize;
+        var scaleMultiplier = Math.Max(0.85, Math.Min(1.3, scaleFactor)); // Better scaling range
+        
+        requiredWidth *= scaleMultiplier;
+        requiredHeight *= scaleMultiplier;
+        
+        // Constrain to min/max values with improved bounds
+        var finalWidth = Math.Max(MinContainerWidth, Math.Min(MaxContainerWidth, requiredWidth));
+        var finalHeight = Math.Max(MinContainerHeight, Math.Min(MaxContainerHeight, requiredHeight));
+        
+        return new Size(finalWidth, finalHeight);
     }
     
-    #endregion
-
-    #region High Performance Drawing
-
-    private void DrawHighPerformanceNetworkDiagram()
+    /// <summary>
+    /// Gets adaptive spacing based on canvas size and element count
+    /// </summary>
+    private double GetAdaptiveSpacing(double baseSpacing)
     {
-        // Simplified drawing for large networks - minimal visual effects for better performance
-        var colors = new[]
-        {
-            GetCachedBrush(Color.FromRgb(99, 102, 241)),
-            GetCachedBrush(Color.FromRgb(16, 185, 129)),
-            GetCachedBrush(Color.FromRgb(245, 158, 11)),
-            GetCachedBrush(Color.FromRgb(139, 92, 246)),
-            GetCachedBrush(Color.FromRgb(236, 72, 153)),
-            GetCachedBrush(Color.FromRgb(20, 184, 166)),
-            GetCachedBrush(Color.FromRgb(251, 146, 60)),
-            GetCachedBrush(Color.FromRgb(34, 197, 94))
-        };
-
-        // Draw simplified main router
-        DrawSimpleMainRouter();
-
-        // Calculate positions
+        var scaleFactor = Math.Min(ActualWidth, ActualHeight) / BaseCanvasSize;
+        return baseSpacing * Math.Max(0.5, Math.Min(1.5, scaleFactor));
+    }
+    
+    /// <summary>
+    /// Centers text within a container and ensures it doesn't exceed bounds
+    /// </summary>
+    private Point CalculateTextPosition(Size textSize, Size containerSize, Point containerPosition, double margin = 5)
+    {
+        var x = containerPosition.X + (containerSize.Width - textSize.Width) / 2;
+        var y = containerPosition.Y + (containerSize.Height - textSize.Height) / 2;
+        
+        // Ensure text doesn't go outside container bounds
+        x = Math.Max(containerPosition.X + margin, Math.Min(containerPosition.X + containerSize.Width - textSize.Width - margin, x));
+        y = Math.Max(containerPosition.Y + margin, Math.Min(containerPosition.Y + containerSize.Height - textSize.Height - margin, y));
+        
+        return new Point(x, y);
+    }
+    
+    /// <summary>
+    /// Calculates optimal radius for network layout based on container sizes
+    /// </summary>
+    private double CalculateOptimalRadius(Size averageContainerSize)
+    {
+        var baseRadius = Math.Min(ActualWidth, ActualHeight) * 0.3;
+        var containerAdjustment = Math.Max(averageContainerSize.Width, averageContainerSize.Height) / 2;
+        
+        // Ensure containers don't overlap and fit comfortably
+        var minRadius = containerAdjustment * 1.5;
+        
+        return Math.Max(minRadius, baseRadius);    }
+    
+    #endregion
+    
+    #region High Performance Drawing
+    private static readonly SolidColorBrush[] ColorPalette = {
+        new(Color.FromRgb(99, 102, 241)), new(Color.FromRgb(16, 185, 129)),
+        new(Color.FromRgb(245, 158, 11)), new(Color.FromRgb(139, 92, 246)),
+        new(Color.FromRgb(236, 72, 153)), new(Color.FromRgb(20, 184, 166)),
+        new(Color.FromRgb(251, 146, 60)), new(Color.FromRgb(34, 197, 94))
+    };    private void DrawHighPerformanceNetworkDiagram()
+    {
+        System.Diagnostics.Debug.WriteLine($"DrawHighPerformanceNetworkDiagram called with {Subnets?.Count} subnets");
         var centerX = ActualWidth / 2;
         var centerY = ActualHeight / 2;
-        var radius = Math.Min(ActualWidth, ActualHeight) * 0.3;
+        
+        // Calculate optimal radius based on improved container sizes
+        var sampleContainer = CalculateOptimalContainerSize(Subnets![0], GetScaledFontSize(12, ActualWidth, ActualHeight), new FontFamily("Consolas"));
+        var baseRadius = Math.Min(ActualWidth, ActualHeight) * 0.32; // Slightly larger base radius
+        var containerRadius = Math.Max(sampleContainer.Width, sampleContainer.Height) / 2;
+        var radius = Math.Max(baseRadius, containerRadius * 1.8); // Ensure adequate spacing
 
-        // Batch creation for better performance
+        DrawSimpleMainRouter();
+
         var elementsToAdd = new List<UIElement>();
 
         for (int i = 0; i < Subnets!.Count; i++)
@@ -285,16 +327,13 @@ public class NetworkDiagram : Canvas
             var x = centerX + radius * Math.Cos(angle);
             var y = centerY + radius * Math.Sin(angle);
 
-            // Simplified connection line (no animation)
             var line = CreateSimpleConnectionLine(centerX, centerY, x, y);
+            var subnetContainer = CreateSimpleSubnetNode(subnet, x, y, ColorPalette[i % ColorPalette.Length]);
+            
             elementsToAdd.Add(line);
-
-            // Simplified subnet node (minimal styling)
-            var subnetContainer = CreateSimpleSubnetNode(subnet, x, y, colors[i % colors.Length]);
             elementsToAdd.Add(subnetContainer);
 
-            // Store basic node info
-            var nodeInfo = new SubnetNodeInfo
+            _subnetNodes.Add(new SubnetNodeInfo
             {
                 Container = subnetContainer,
                 Subnet = subnet,
@@ -302,22 +341,12 @@ public class NetworkDiagram : Canvas
                 Velocity = new Point(0, 0),
                 IsDecelerating = false,
                 LastMoveTime = DateTime.Now
-            };
-            _subnetNodes.Add(nodeInfo);
+            });
             _connectionLines[subnetContainer] = line;
-        }
-
-        // Add all elements at once
-        foreach (var element in elementsToAdd)
-        {
-            Children.Add(element);
-        }
-
-        // Simple base network label
+        }        foreach (var element in elementsToAdd) Children.Add(element);
+        System.Diagnostics.Debug.WriteLine($"DrawHighPerformanceNetworkDiagram: Added {elementsToAdd.Count} elements to Children");
         DrawSimpleBaseNetworkLabel();
-    }
-
-    private void DrawSimpleMainRouter()
+    }private void DrawSimpleMainRouter()
     {
         var centerX = ActualWidth / 2;
         var centerY = ActualHeight / 2;
@@ -332,7 +361,6 @@ public class NetworkDiagram : Canvas
             Stroke = GetCachedBrush(Color.FromRgb(99, 102, 241)),
             StrokeThickness = 2
         };
-
         Canvas.SetLeft(routerBg, centerX - routerRadius);
         Canvas.SetTop(routerBg, centerY - routerRadius);
         Children.Add(routerBg);
@@ -344,7 +372,6 @@ public class NetworkDiagram : Canvas
             FontWeight = FontWeights.Bold,
             Foreground = Brushes.White
         };
-
         Canvas.SetLeft(routerIcon, centerX - 6);
         Canvas.SetTop(routerIcon, centerY - 9);
         Children.Add(routerIcon);
@@ -372,52 +399,67 @@ public class NetworkDiagram : Canvas
             StrokeThickness = 1,
             Opacity = 0.6
         };
-    }
-
-    private Border CreateSimpleSubnetNode(SubnetInfo subnet, double x, double y, Brush color)
+    }    private Border CreateSimpleSubnetNode(SubnetInfo subnet, double x, double y, Brush color)
     {
+        // Calculate responsive font sizes with improved scaling
+        var primaryFontSize = GetScaledFontSize(12, ActualWidth, ActualHeight); // Increased base font size
+        var secondaryFontSize = GetScaledFontSize(10, ActualWidth, ActualHeight); // Increased base font size
+        var fontFamily = new FontFamily("Consolas");
+        
+        // Calculate optimal container size based on content
+        var containerSize = CalculateOptimalContainerSize(subnet, primaryFontSize, fontFamily);
+        
+        // For high-performance mode, still ensure minimum readable size
+        containerSize.Width = Math.Max(120, containerSize.Width * 0.8); // Increased minimum width
+        containerSize.Height = Math.Max(60, containerSize.Height * 0.8); // Increased minimum height
+        
         var container = new Border
         {
-            Width = 110,
-            Height = 60,
+            Width = containerSize.Width,
+            Height = containerSize.Height,
             Background = GetCachedBrush(Color.FromArgb(180, 31, 41, 55)),
             CornerRadius = new CornerRadius(6),
             BorderBrush = color,
-            BorderThickness = new Thickness(1)
+            BorderThickness = new Thickness(1),
+            Cursor = Cursors.Hand
         };
-
-        var contentStack = new StackPanel
-        {
-            Margin = new Thickness(6, 4, 6, 4)
-        };
-
+          var adaptiveMargin = Math.Max(10, GetAdaptiveSpacing(12)); // Increased minimum margin
+        var contentStack = new StackPanel { Margin = new Thickness(adaptiveMargin) };
+        
+        // Network address with measured sizing and improved readability
         var networkText = new TextBlock
         {
             Text = subnet.Network,
-            FontSize = 9,
+            FontSize = primaryFontSize,
             FontWeight = FontWeights.Bold,
             Foreground = Brushes.White,
-            FontFamily = new FontFamily("Consolas"),
-            HorizontalAlignment = HorizontalAlignment.Center
+            FontFamily = fontFamily,
+            HorizontalAlignment = HorizontalAlignment.Center,
+            TextWrapping = TextWrapping.NoWrap,
+            TextTrimming = TextTrimming.CharacterEllipsis,
+            Margin = new Thickness(0, 0, 0, adaptiveMargin * 0.3) // Add spacing between elements
         };
         contentStack.Children.Add(networkText);
-
+        
+        // Host count with appropriate sizing and improved contrast
         var hostsText = new TextBlock
         {
             Text = $"{subnet.UsableHosts} hosts",
-            FontSize = 8,
-            Foreground = GetCachedBrush(Color.FromRgb(200, 200, 200)),
-            HorizontalAlignment = HorizontalAlignment.Center
+            FontSize = secondaryFontSize,
+            Foreground = GetCachedBrush(Color.FromRgb(220, 220, 220)), // Improved contrast
+            HorizontalAlignment = HorizontalAlignment.Center,
+            TextWrapping = TextWrapping.NoWrap,
+            Margin = new Thickness(0, 0, 0, adaptiveMargin * 0.2)
         };
         contentStack.Children.Add(hostsText);
 
         container.Child = contentStack;
-        Canvas.SetLeft(container, x - 55);
-        Canvas.SetTop(container, y - 30);
+        
+        // Center the container properly based on its actual size
+        Canvas.SetLeft(container, x - containerSize.Width / 2);
+        Canvas.SetTop(container, y - containerSize.Height / 2);
 
-        // Add basic drag functionality only
         AddBasicInteractivity(container);
-
         return container;
     }
 
@@ -426,120 +468,118 @@ public class NetworkDiagram : Canvas
         container.MouseLeftButtonDown += SubnetNode_MouseLeftButtonDown;
         container.MouseMove += SubnetNode_MouseMove;
         container.MouseLeftButtonUp += SubnetNode_MouseLeftButtonUp;
-        container.Cursor = Cursors.Hand;
-    }
-
-    private void DrawSimpleBaseNetworkLabel()
+    }    private void DrawSimpleBaseNetworkLabel()
     {
-        var label = new Border
+        var fontSize = GetScaledFontSize(11, ActualWidth, ActualHeight); // Increased base font size
+        var fontFamily = new FontFamily("Consolas");
+        
+        // Measure text to ensure proper container sizing
+        var labelText = $"Base: {BaseNetwork}";
+        var textSize = MeasureTextSize(labelText, fontSize, fontFamily, FontWeights.SemiBold);
+        
+        // Calculate adaptive padding with better minimums
+        var adaptivePadding = Math.Max(10, GetAdaptiveSpacing(12));
+        
+        var textBlock = new TextBlock
         {
-            Background = GetCachedBrush(Color.FromArgb(140, 99, 102, 241)),
-            CornerRadius = new CornerRadius(4),
-            Padding = new Thickness(8, 4, 8, 4)
-        };
-
-        var labelText = new TextBlock
-        {
-            Text = $"Base: {BaseNetwork}",
-            FontSize = 10,
+            Text = labelText,
+            FontSize = fontSize,
             FontWeight = FontWeights.SemiBold,
             Foreground = Brushes.White,
-            FontFamily = new FontFamily("Consolas")
+            FontFamily = fontFamily,
+            TextWrapping = TextWrapping.NoWrap,
+            TextTrimming = TextTrimming.CharacterEllipsis
+        };
+        
+        var label = new Border
+        {
+            Background = GetCachedBrush(Color.FromArgb(160, 99, 102, 241)), // Improved opacity for better readability
+            CornerRadius = new CornerRadius(6), // Slightly larger corner radius
+            Padding = new Thickness(adaptivePadding, adaptivePadding / 2, adaptivePadding, adaptivePadding / 2),
+            Child = textBlock
         };
 
-        label.Child = labelText;
-        Canvas.SetLeft(label, 10);
-        Canvas.SetTop(label, 10);
+        // Position with adaptive spacing and ensure it doesn't go off-screen
+        var margin = Math.Max(12, GetAdaptiveSpacing(15));
+        var labelWidth = textSize.Width + (adaptivePadding * 2);        var maxX = Math.Max(0, ActualWidth - labelWidth - margin);
+        
+        Canvas.SetLeft(label, Math.Min(margin, maxX));
+        Canvas.SetTop(label, margin);
         Children.Add(label);
     }
-
+    
     #endregion
-
+    
     #region Modern Drawing (Enhanced Performance)
-
+    
     private void DrawModernNetworkDiagram()
     {
-        // Modern color palette with cached brushes
-        var colors = new[]
-        {
-            GetCachedBrush(Color.FromRgb(99, 102, 241)),   // Primary
-            GetCachedBrush(Color.FromRgb(16, 185, 129)),   // Secondary  
-            GetCachedBrush(Color.FromRgb(245, 158, 11)),   // Accent
-            GetCachedBrush(Color.FromRgb(139, 92, 246)),   // Purple
-            GetCachedBrush(Color.FromRgb(236, 72, 153)),   // Pink
-            GetCachedBrush(Color.FromRgb(20, 184, 166)),   // Teal
-            GetCachedBrush(Color.FromRgb(251, 146, 60)),   // Orange
-            GetCachedBrush(Color.FromRgb(34, 197, 94))     // Green
-        };
-
-        // Draw main router/switch in center
-        DrawMainRouter();
-
-        // Calculate positions for subnets in a circular layout
+        System.Diagnostics.Debug.WriteLine($"DrawModernNetworkDiagram called with {Subnets?.Count} subnets");
         var centerX = ActualWidth / 2;
         var centerY = ActualHeight / 2;
-        var radius = Math.Min(ActualWidth, ActualHeight) * 0.3;
+        
+        // Calculate optimal radius based on improved container sizes
+        var sampleContainer = CalculateOptimalContainerSize(Subnets![0], GetScaledFontSize(13, ActualWidth, ActualHeight), new FontFamily("Consolas"));
+        var baseRadius = Math.Min(ActualWidth, ActualHeight) * 0.35; // Larger base radius for modern mode
+        var containerRadius = Math.Max(sampleContainer.Width, sampleContainer.Height) / 2;
+        var radius = Math.Max(baseRadius, containerRadius * 2.0); // More generous spacing for larger containers
 
-        // Batch operations for better performance
-        var elementsToAdd = new List<UIElement>();
+        DrawMainRouter(centerX, centerY);
 
-        for (int i = 0; i < Subnets!.Count; i++)
+        var elementsToAdd = new List<UIElement>();        for (int i = 0; i < Subnets!.Count; i++)
         {
             var subnet = Subnets[i];
             var angle = (2 * Math.PI * i) / Subnets.Count;
             var x = centerX + radius * Math.Cos(angle);
             var y = centerY + radius * Math.Sin(angle);
 
-            // Draw connection line with selective animation
-            var line = DrawConnectionLine(centerX, centerY, x, y, i);
-            elementsToAdd.Add(line);
-
-            // Draw subnet node with optimized styling
-            var subnetContainer = DrawSubnetNode(subnet, x, y, colors[i % colors.Length], i);
-            elementsToAdd.Add(subnetContainer);
-
-            // Store subnet node info for interactions
-            var nodeInfo = new SubnetNodeInfo
-            {
-                Container = subnetContainer,
-                Subnet = subnet,
-                Position = new Point(x, y),
-                Velocity = new Point(0, 0),
-                IsDecelerating = false,
-                LastMoveTime = DateTime.Now
-            };
-            _subnetNodes.Add(nodeInfo);
+            System.Diagnostics.Debug.WriteLine($"Creating subnet node {i}: {subnet.Network} at ({x:F1}, {y:F1})");
+              var line = DrawConnectionLine(centerX, centerY, x, y, i);
+            var subnetContainer = DrawSubnetNode(subnet, x, y, ColorPalette[i % ColorPalette.Length], i);
             
-            // Store connection line for updates
-            _connectionLines[subnetContainer] = line;
+            System.Diagnostics.Debug.WriteLine($"Subnet node {i} created - Line: {line != null}, Container: {subnetContainer != null}");
+              if (line != null) elementsToAdd.Add(line);
+            if (subnetContainer != null) elementsToAdd.Add(subnetContainer);
+
+            if (subnetContainer != null)
+            {
+                _subnetNodes.Add(new SubnetNodeInfo
+                {
+                    Container = subnetContainer,
+                    Subnet = subnet,
+                    Position = new Point(x, y),
+                    Velocity = new Point(0, 0),
+                    IsDecelerating = false,
+                    LastMoveTime = DateTime.Now
+                });
+                if (line != null)
+                    _connectionLines[subnetContainer] = line;
+            }
         }
 
-        // Batch add all elements for better performance
-        foreach (var element in elementsToAdd)
+        System.Diagnostics.Debug.WriteLine($"Adding {elementsToAdd.Count} elements to canvas");
+        foreach (var element in elementsToAdd) 
         {
             Children.Add(element);
+            System.Diagnostics.Debug.WriteLine($"Added element: {element.GetType().Name}");
         }
-
-        // Draw base network label
         DrawBaseNetworkLabel();
-    }
-
-    private void DrawMainRouter()
+    }private void DrawMainRouter(double centerX, double centerY)
     {
-        var centerX = ActualWidth / 2;
-        var centerY = ActualHeight / 2;
-        const double routerSize = 80;
-        const double routerRadius = routerSize / 2;
+        // Calculate responsive router size based on canvas dimensions with better scaling
+        var baseRouterSize = 90; // Increased base size
+        var scaleFactor = Math.Min(ActualWidth, ActualHeight) / BaseCanvasSize;
+        var routerSize = Math.Max(70, Math.Min(140, baseRouterSize * scaleFactor)); // Better size range
+        var routerRadius = routerSize / 2;
 
-        // Simplified router background - reduced effects for better performance
         var routerBg = new Ellipse
         {
             Width = routerSize,
             Height = routerSize,
             Fill = GetCachedBrush(Color.FromRgb(55, 65, 81)),
             Stroke = GetCachedBrush(Color.FromRgb(99, 102, 241)),
-            StrokeThickness = 3,
-            // Only apply shadow effect for very small networks
+            StrokeThickness = Math.Max(2, 3 * scaleFactor),
+            // Only apply shadow effect for small networks
             Effect = Subnets!.Count <= 6 ? new System.Windows.Media.Effects.DropShadowEffect
             {
                 Color = Colors.Black,
@@ -553,18 +593,19 @@ public class NetworkDiagram : Canvas
         Canvas.SetTop(routerBg, centerY - routerRadius);
         Children.Add(routerBg);
 
-        // Router icon - centered properly
+        // Router icon with responsive sizing
+        var iconFontSize = GetScaledFontSize(36, ActualWidth, ActualHeight); // Increased base size
         var routerIcon = new TextBlock
         {
             Text = "🌐",
-            FontSize = 32,
+            FontSize = iconFontSize,
             Foreground = Brushes.White,
             HorizontalAlignment = HorizontalAlignment.Center,
             VerticalAlignment = VerticalAlignment.Center,
             TextAlignment = TextAlignment.Center
         };
 
-        // Measure the icon to center it properly
+        // Measure and center the icon properly with better positioning
         routerIcon.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
         var iconWidth = routerIcon.DesiredSize.Width;
         var iconHeight = routerIcon.DesiredSize.Height;
@@ -573,23 +614,24 @@ public class NetworkDiagram : Canvas
         Canvas.SetTop(routerIcon, centerY - iconHeight / 2);
         Children.Add(routerIcon);
 
-        // Router label - centered properly
+        // Router label with responsive sizing and proper measurement
+        var labelFontSize = GetScaledFontSize(13, ActualWidth, ActualHeight); // Increased base size
         var routerLabel = new TextBlock
         {
             Text = "Main Router",
-            FontSize = 12,    
-            FontWeight = FontWeights.Bold,  
+            FontSize = labelFontSize,
+            FontWeight = FontWeights.Bold,
             Foreground = Brushes.White,
             HorizontalAlignment = HorizontalAlignment.Center,
             TextAlignment = TextAlignment.Center
         };
 
-        // Measure the text to center it properly
+        // Measure and center the text properly with adaptive spacing
         routerLabel.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
         var textWidth = routerLabel.DesiredSize.Width;
-        
-        Canvas.SetLeft(routerLabel, centerX - textWidth / 2);
-        Canvas.SetTop(routerLabel, centerY + routerRadius + 10);
+        var labelSpacing = Math.Max(12, GetAdaptiveSpacing(15)); // Better minimum spacing
+          Canvas.SetLeft(routerLabel, centerX - textWidth / 2);
+        Canvas.SetTop(routerLabel, centerY + routerRadius + labelSpacing);
         Children.Add(routerLabel);
 
         // Simplified pulsing animation - only for very small networks
@@ -599,7 +641,7 @@ public class NetworkDiagram : Canvas
             {
                 From = 0.9,
                 To = 1.1,
-                Duration = TimeSpan.FromSeconds(3), // Slower animation
+                Duration = TimeSpan.FromSeconds(3),
                 RepeatBehavior = RepeatBehavior.Forever,
                 AutoReverse = true,
                 EasingFunction = new SineEase { EasingMode = EasingMode.EaseInOut }
@@ -610,10 +652,10 @@ public class NetworkDiagram : Canvas
             scaleTransform.BeginAnimation(ScaleTransform.ScaleXProperty, pulseAnimation);
             scaleTransform.BeginAnimation(ScaleTransform.ScaleYProperty, pulseAnimation);
         }
-    }
-
-    private Line DrawConnectionLine(double x1, double y1, double x2, double y2, int index)
+    }    private Line DrawConnectionLine(double x1, double y1, double x2, double y2, int index)
     {
+        System.Diagnostics.Debug.WriteLine($"DrawConnectionLine called: from ({x1:F1},{y1:F1}) to ({x2:F1},{y2:F1}), index={index}");
+        
         const double routerRadius = 40; // Half of router size (80/2)
         
         // Calculate the direction vector from router center to subnet center
@@ -655,20 +697,30 @@ public class NetworkDiagram : Canvas
                 To = 0.7,
                 Duration = TimeSpan.FromMilliseconds(300 + index * 50),
                 EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut }
-            };
-            line.BeginAnimation(OpacityProperty, fadeAnimation);
+            };            line.BeginAnimation(OpacityProperty, fadeAnimation);
         }
         
+        System.Diagnostics.Debug.WriteLine($"DrawConnectionLine returning line: {line != null}");
         return line;
-    }
-
-    private Border DrawSubnetNode(SubnetInfo subnet, double x, double y, Brush color, int index)
+    }    private Border DrawSubnetNode(SubnetInfo subnet, double x, double y, Brush color, int index)
     {
-        // Create subnet container with optimized design
+        System.Diagnostics.Debug.WriteLine($"DrawSubnetNode called: subnet={subnet.Network}, position=({x:F1},{y:F1}), index={index}");
+        
+        // Calculate responsive font sizes with improved base sizes
+        var primaryFontSize = GetScaledFontSize(13, ActualWidth, ActualHeight); // Increased base size
+        var secondaryFontSize = GetScaledFontSize(11, ActualWidth, ActualHeight); // Increased base size
+        var tertiaryFontSize = GetScaledFontSize(10, ActualWidth, ActualHeight); // Increased base size
+        var fontFamily = new FontFamily("Consolas");
+        
+        // Calculate optimal container size based on content
+        var containerSize = CalculateOptimalContainerSize(subnet, primaryFontSize, fontFamily);
+        System.Diagnostics.Debug.WriteLine($"DrawSubnetNode: Container size calculated as {containerSize.Width}x{containerSize.Height}");
+        
+        // Create subnet container with responsive design
         var container = new Border
         {
-            Width = 160,
-            Height = 100,
+            Width = containerSize.Width,
+            Height = containerSize.Height,
             Background = GetCachedBrush(Color.FromArgb(200, 31, 41, 55)),
             CornerRadius = new CornerRadius(12),
             BorderBrush = color,
@@ -677,36 +729,36 @@ public class NetworkDiagram : Canvas
             Effect = Subnets!.Count <= 8 ? new System.Windows.Media.Effects.DropShadowEffect
             {
                 Color = Colors.Black,
-                BlurRadius = 6, // Reduced from 10
-                Opacity = 0.2, // Reduced from 0.3
-                ShadowDepth = 3 // Reduced from 5
+                BlurRadius = 6,
+                Opacity = 0.2,
+                ShadowDepth = 3
             } : null
-        };
-
-        // Content stack
+        };        // Content stack with adaptive margin and improved spacing
+        var adaptiveMargin = Math.Max(15, GetAdaptiveSpacing(18)); // Increased minimum margin
         var contentStack = new StackPanel
         {
-            Margin = new Thickness(12, 8, 12, 8)
+            Margin = new Thickness(adaptiveMargin, adaptiveMargin, adaptiveMargin, adaptiveMargin)
         };
 
-        // Subnet header with icon
+        // Subnet header with icon and improved layout
         var headerGrid = new Grid();
         headerGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Auto) });
         headerGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
 
+        var iconSize = Math.Max(18, primaryFontSize * 1.3); // Increased icon size
         var icon = new Border
         {
-            Width = 20,
-            Height = 20,
+            Width = iconSize,
+            Height = iconSize,
             Background = color,
             CornerRadius = new CornerRadius(4),
-            Margin = new Thickness(0, 0, 6, 0)
+            Margin = new Thickness(0, 0, adaptiveMargin * 0.8, 0)
         };
         
         var iconText = new TextBlock
         {
             Text = "🔌",
-            FontSize = 10,
+            FontSize = iconSize * 0.65, // Better icon scaling
             HorizontalAlignment = HorizontalAlignment.Center,
             VerticalAlignment = VerticalAlignment.Center,
             Foreground = Brushes.White
@@ -719,58 +771,64 @@ public class NetworkDiagram : Canvas
         var networkText = new TextBlock
         {
             Text = subnet.Network,
-            FontSize = 11,
+            FontSize = primaryFontSize,
             FontWeight = FontWeights.Bold,
             Foreground = Brushes.White,
-            FontFamily = new FontFamily("Consolas"),
-            VerticalAlignment = VerticalAlignment.Center
+            FontFamily = fontFamily,
+            VerticalAlignment = VerticalAlignment.Center,
+            TextWrapping = TextWrapping.NoWrap,
+            TextTrimming = TextTrimming.CharacterEllipsis
         };
         Grid.SetColumn(networkText, 1);
         headerGrid.Children.Add(networkText);
 
-        contentStack.Children.Add(headerGrid);
-
-        // Hosts info
+        contentStack.Children.Add(headerGrid);        // Hosts info with responsive sizing and improved spacing
+        var lineSpacing = Math.Max(4, adaptiveMargin * 0.4); // Increased line spacing
         var hostsText = new TextBlock
         {
             Text = $"{subnet.UsableHosts} hosts",
-            FontSize = 10,
-            Foreground = GetCachedBrush(Color.FromRgb(156, 163, 175)),
-            Margin = new Thickness(0, 2, 0, 0)
+            FontSize = secondaryFontSize,
+            Foreground = GetCachedBrush(Color.FromRgb(180, 190, 200)), // Improved contrast
+            Margin = new Thickness(0, lineSpacing, 0, 0),
+            TextWrapping = TextWrapping.NoWrap
         };
         contentStack.Children.Add(hostsText);
 
-        // Required hosts
+        // Required hosts with better spacing
         var requiredText = new TextBlock
         {
             Text = $"Required: {subnet.RequiredHosts}",
-            FontSize = 9,
+            FontSize = tertiaryFontSize,
             Foreground = GetCachedBrush(Color.FromRgb(245, 158, 11)),
-            Margin = new Thickness(0, 1, 0, 0)
+            Margin = new Thickness(0, lineSpacing * 0.8, 0, 0),
+            TextWrapping = TextWrapping.NoWrap
         };
         contentStack.Children.Add(requiredText);
 
-        // Host range
+        // Host range with text trimming for long addresses and improved spacing
         var rangeText = new TextBlock
         {
             Text = $"{subnet.FirstHost} - {subnet.LastHost}",
-            FontSize = 9,
+            FontSize = tertiaryFontSize,
             Foreground = GetCachedBrush(Color.FromRgb(125, 211, 252)),
-            FontFamily = new FontFamily("Consolas"),
-            Margin = new Thickness(0, 2, 0, 0)
+            FontFamily = fontFamily,
+            Margin = new Thickness(0, lineSpacing, 0, 0),
+            TextWrapping = TextWrapping.NoWrap,
+            TextTrimming = TextTrimming.CharacterEllipsis
         };
         contentStack.Children.Add(rangeText);
 
         container.Child = contentStack;
 
-        Canvas.SetLeft(container, x - 80);
-        Canvas.SetTop(container, y - 50);
+        // Center the container properly based on its actual size
+        Canvas.SetLeft(container, x - containerSize.Width / 2);
+        Canvas.SetTop(container, y - containerSize.Height / 2);
 
         // Simplified entrance animation - only for small networks
         if (Subnets!.Count <= 8)
         {
             var transformGroup = new TransformGroup();
-            var scaleTransform = new ScaleTransform(0.8, 0.8, 80, 50);
+            var scaleTransform = new ScaleTransform(0.8, 0.8, containerSize.Width / 2, containerSize.Height / 2);
             transformGroup.Children.Add(scaleTransform);
             
             container.RenderTransform = transformGroup;
@@ -782,7 +840,7 @@ public class NetworkDiagram : Canvas
                 From = 0.8,
                 To = 1,
                 Duration = TimeSpan.FromMilliseconds(300),
-                BeginTime = TimeSpan.FromMilliseconds(100 + index * 50), // Reduced stagger
+                BeginTime = TimeSpan.FromMilliseconds(100 + index * 50),
                 EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut }
             };
 
@@ -797,55 +855,71 @@ public class NetworkDiagram : Canvas
             scaleTransform.BeginAnimation(ScaleTransform.ScaleXProperty, scaleAnimation);
             scaleTransform.BeginAnimation(ScaleTransform.ScaleYProperty, scaleAnimation);
             container.BeginAnimation(OpacityProperty, fadeAnimation);
-        }
-
-        // Add interactive functionality
+        }        // Add interactive functionality
         AddInteractiveEvents(container);
 
+        System.Diagnostics.Debug.WriteLine($"DrawSubnetNode returning container: {container != null}, Width={container?.Width}, Height={container?.Height}");
         return container;
-    }
-
-    private void DrawBaseNetworkLabel()
+    }    private void DrawBaseNetworkLabel()
     {
+        var fontSize = GetScaledFontSize(13, ActualWidth, ActualHeight); // Increased base font size
+        var fontFamily = new FontFamily("Consolas");
+        
+        // Measure text to ensure proper container sizing
+        var labelText = $"Base Network: {BaseNetwork}";
+        var textSize = MeasureTextSize(labelText, fontSize, fontFamily, FontWeights.Bold);
+        
+        // Calculate adaptive padding and positioning with better minimums
+        var adaptivePadding = Math.Max(14, GetAdaptiveSpacing(16)); // Better minimum padding
+        var adaptiveMargin = Math.Max(20, GetAdaptiveSpacing(25)); // Better minimum margin
+        
+        var textBlock = new TextBlock
+        {
+            Text = labelText,
+            FontSize = fontSize,
+            FontWeight = FontWeights.Bold,
+            Foreground = Brushes.White,
+            FontFamily = fontFamily,
+            TextWrapping = TextWrapping.NoWrap,
+            TextTrimming = TextTrimming.CharacterEllipsis
+        };
+        
         var label = new Border
         {
-            Background = GetCachedBrush(Color.FromArgb(180, 99, 102, 241)),
-            CornerRadius = new CornerRadius(8),
-            Padding = new Thickness(12, 6, 12, 6),
-            Effect = new System.Windows.Media.Effects.DropShadowEffect
+            Background = GetCachedBrush(Color.FromArgb(190, 99, 102, 241)), // Improved opacity for better readability
+            CornerRadius = new CornerRadius(10), // Larger corner radius for modern look
+            Padding = new Thickness(adaptivePadding, adaptivePadding * 0.6, adaptivePadding, adaptivePadding * 0.6),
+            Effect = Subnets!.Count <= 12 ? new System.Windows.Media.Effects.DropShadowEffect
             {
                 Color = Colors.Black,
                 BlurRadius = 8,
                 Opacity = 0.3,
                 ShadowDepth = 3
-            }
+            } : null,
+            Child = textBlock
         };
 
-        var labelText = new TextBlock
-        {
-            Text = $"Base Network: {BaseNetwork}",
-            FontSize = 12,
-            FontWeight = FontWeights.Bold,
-            Foreground = Brushes.White,
-            FontFamily = new FontFamily("Consolas")
-        };
-
-        label.Child = labelText;
-
-        Canvas.SetLeft(label, 20);
-        Canvas.SetTop(label, 20);
+        // Position with adaptive spacing and ensure it doesn't go off-screen
+        var labelWidth = textSize.Width + (adaptivePadding * 2);
+        var maxX = Math.Max(0, ActualWidth - labelWidth - adaptiveMargin);
+        
+        Canvas.SetLeft(label, Math.Min(adaptiveMargin, maxX));
+        Canvas.SetTop(label, adaptiveMargin);
         Children.Add(label);
 
-        // Add fade-in animation
-        var fadeAnimation = new DoubleAnimation
+        // Add fade-in animation only for smaller networks
+        if (Subnets!.Count <= 12)
         {
-            From = 0,
-            To = 1,
-            Duration = TimeSpan.FromMilliseconds(500),
-            BeginTime = TimeSpan.FromMilliseconds(100)
-        };
+            var fadeAnimation = new DoubleAnimation
+            {
+                From = 0,
+                To = 1,
+                Duration = TimeSpan.FromMilliseconds(500),
+                BeginTime = TimeSpan.FromMilliseconds(100)
+            };
 
-        label.BeginAnimation(OpacityProperty, fadeAnimation);
+            label.BeginAnimation(OpacityProperty, fadeAnimation);
+        }
     }
 
     #endregion
@@ -1248,18 +1322,14 @@ public class NetworkDiagram : Canvas
             Canvas.SetTop(nodeInfo.Container, finalY);
             
             UpdateConnectionLine(nodeInfo.Container);
-            
-            lock (_animationLock)
+              lock (_animationLock)
             {
                 _activeAnimations.Remove(nodeInfo.Container);
-                _animatingNodes.Remove(nodeInfo.Container);
             }
         };
-        
-        lock (_animationLock)
+          lock (_animationLock)
         {
             _activeAnimations[nodeInfo.Container] = storyboard;
-            _animatingNodes.Add(nodeInfo.Container);
         }
         
         storyboard.Begin();
@@ -1285,12 +1355,12 @@ public class NetworkDiagram : Canvas
     {
         // Clean up resources
         StopDecelerationTimer();
-        CleanupAllAnimations();
-        _currentDrawCancellation?.Cancel();
+        CleanupAllAnimations();        _currentDrawCancellation?.Cancel();
         _currentDrawCancellation?.Dispose();
         _currentDrawCancellation = null;
         
         // Clear caches
         _cachedBrushes.Clear();
     }
+    #endregion
 }

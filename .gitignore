@@ -1,0 +1,13 @@
+# Build directories
+bin/
+obj/
+
+# Visual Studio IDE files
+.vs/
+
+# Temporary WPF files generated during build
+*_wpftmp.csproj
+
+# Visual Studio temporary files
+*.tmp
+*.tmp_proj
