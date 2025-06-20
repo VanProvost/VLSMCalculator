@@ -11,3 +11,5 @@ obj/
 # Visual Studio temporary files
 *.tmp
 *.tmp_proj
+
+.github/
