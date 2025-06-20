@@ -27,6 +27,23 @@ namespace VLSMCalculator
         {
             try
             {
+                // Check if we're running on the correct .NET version
+                var version = Environment.Version;
+                if (version.Major < 9)
+                {
+                    MessageBox.Show(
+                        $"This application requires .NET 9.0 or later.\n" +
+                        $"Current version: {version}\n\n" +
+                        $"Please download and install .NET 9.0 from:\n" +
+                        $"https://dotnet.microsoft.com/download/dotnet/9.0",
+                        "Missing Runtime", 
+                        MessageBoxButton.OK, 
+                        MessageBoxImage.Warning);
+                    
+                    Shutdown(1);
+                    return;
+                }
+
                 Console.WriteLine("App starting up...");
                 base.OnStartup(e);
                 
