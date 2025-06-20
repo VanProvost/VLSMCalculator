@@ -103,191 +103,105 @@ public class SubnetTree : Canvas
         BuildVLSMPyramid(rootNode, nodes, baseCidr);
 
         return nodes;
-    }
-
-    private void BuildVLSMPyramid(TreeNode rootNode, List<TreeNode> allNodes, int baseCidr)
+    }    private void BuildVLSMPyramid(TreeNode rootNode, List<TreeNode> allNodes, int baseCidr)
     {
         // Sort subnets by size (largest first) - this is how VLSM allocation works
         var sortedSubnets = Subnets.OrderByDescending(s => s.UsableHosts).ToList();
         
-        // Create allocation tracking
-        var availableBlocks = new List<AddressBlock>
-        {
-            new AddressBlock
-            {
-                NetworkInt = rootNode.NetworkInt,
-                CIDR = baseCidr,
-                Size = (uint)Math.Pow(2, 32 - baseCidr),
-                IsAllocated = false
-            }
-        };
-
-        // Track all subdivision steps
-        var subdivisionSteps = new List<SubdivisionStep>();
+        // Create comprehensive tree structure showing ALL intermediary steps
+        var allIntermediarySteps = new HashSet<(uint NetworkInt, int CIDR)>();
         
-        // Simulate the VLSM allocation process and track intermediate steps
+        // For each subnet, add ALL intermediary steps from base CIDR to target CIDR
         foreach (var subnet in sortedSubnets)
         {
             var subnetNetInt = NetworkCalculationService.ConvertIPToUInt32(subnet.NetworkAddress);
             
-            // Find which block this subnet was allocated from
-            var sourceBlock = FindSourceBlock(availableBlocks, subnetNetInt, subnet.CIDR);
-            if (sourceBlock != null)
+            // Add all intermediary steps from base CIDR to target CIDR
+            for (int cidr = baseCidr + 1; cidr <= subnet.CIDR; cidr++)
             {
-                // Create subdivision steps showing the intermediate splits
-                var steps = CreateSubdivisionSteps(sourceBlock, subnet, subnetNetInt);
-                subdivisionSteps.AddRange(steps);
-
-                // Update available blocks
-                SplitBlock(sourceBlock, availableBlocks, subnetNetInt, subnet.CIDR);
+                var networkMask = 0xFFFFFFFFU << (32 - cidr);
+                var networkInt = subnetNetInt & networkMask;
+                allIntermediarySteps.Add((networkInt, cidr));
             }
         }
 
-        // Build tree from subdivision steps
-        BuildTreeFromSubdivisions(rootNode, allNodes, subdivisionSteps);
-    }
-
-    private List<SubdivisionStep> CreateSubdivisionSteps(AddressBlock sourceBlock, SubnetInfo targetSubnet, uint subnetNetInt)
-    {
-        var steps = new List<SubdivisionStep>();
+        // Convert to subdivision steps
+        var subdivisionSteps = new List<SubdivisionStep>();
         
-        // Create intermediate subdivision steps
-        for (int cidr = sourceBlock.CIDR + 1; cidr <= targetSubnet.CIDR; cidr++)
+        foreach (var (networkInt, cidr) in allIntermediarySteps)
         {
-            var networkMask = 0xFFFFFFFF << (32 - cidr);
-            var networkInt = subnetNetInt & (uint)networkMask;
+            var networkAddress = NetworkCalculationService.ConvertUInt32ToIP(networkInt);
+            var matchingSubnet = sortedSubnets.FirstOrDefault(s => 
+                s.CIDR == cidr && 
+                NetworkCalculationService.ConvertIPToUInt32(s.NetworkAddress) == networkInt);
             
             var step = new SubdivisionStep
             {
                 NetworkInt = networkInt,
                 CIDR = cidr,
-                NetworkAddress = NetworkCalculationService.ConvertUInt32ToIP(networkInt),
-                IsAllocated = (cidr == targetSubnet.CIDR),
-                IsIntermediate = (cidr < targetSubnet.CIDR),
-                TargetSubnet = (cidr == targetSubnet.CIDR) ? targetSubnet : null,
-                SourceCIDR = sourceBlock.CIDR,
-                Level = cidr - sourceBlock.CIDR
+                NetworkAddress = networkAddress,
+                IsAllocated = matchingSubnet != null,
+                IsIntermediate = matchingSubnet == null,
+                TargetSubnet = matchingSubnet,
+                SourceCIDR = baseCidr,
+                Level = cidr - baseCidr
             };
             
-            steps.Add(step);
+            subdivisionSteps.Add(step);
         }
-        
-        return steps;
-    }
 
-    private void BuildTreeFromSubdivisions(TreeNode rootNode, List<TreeNode> allNodes, List<SubdivisionStep> subdivisionSteps)
+        // Build tree from subdivision steps
+        BuildTreeFromSubdivisions(rootNode, allNodes, subdivisionSteps);
+    }private void BuildTreeFromSubdivisions(TreeNode rootNode, List<TreeNode> allNodes, List<SubdivisionStep> subdivisionSteps)
     {
-        // Group steps by level to build pyramid structure
-        var levelGroups = subdivisionSteps.GroupBy(s => s.Level).OrderBy(g => g.Key);
+        // Sort steps by level and then by network address to ensure proper hierarchy
+        var sortedSteps = subdivisionSteps.OrderBy(s => s.Level).ThenBy(s => s.NetworkInt).ToList();
         
-        foreach (var levelGroup in levelGroups)
+        foreach (var step in sortedSteps)
         {
-            foreach (var step in levelGroup.OrderBy(s => s.NetworkInt))
+            // Find the best parent node (most specific parent that contains this network)
+            var parentNode = FindBestParentNode(allNodes, step) ?? rootNode;
+
+            // Create node for this subdivision step
+            var stepNode = new TreeNode
             {
-                // Find parent node (either root or previously created intermediate node)
-                var parentNode = FindBestParentNode(allNodes, step) ?? rootNode;
+                NetworkInt = step.NetworkInt,
+                CIDR = step.CIDR,
+                NetworkAddress = step.NetworkAddress,
+                Level = step.Level, // Use the level from the step directly
+                IsUsed = step.IsAllocated,
+                IsAllocated = step.IsAllocated,
+                IsIntermediate = step.IsIntermediate,
+                Parent = parentNode,
+                SubnetInfo = step.TargetSubnet,
+                Children = new List<TreeNode>()
+            };
 
-                // Create node for this subdivision step
-                var stepNode = new TreeNode
-                {
-                    NetworkInt = step.NetworkInt,
-                    CIDR = step.CIDR,
-                    NetworkAddress = step.NetworkAddress,
-                    Level = parentNode.Level + 1,
-                    IsUsed = step.IsAllocated,
-                    IsAllocated = step.IsAllocated,
-                    IsIntermediate = step.IsIntermediate,
-                    Parent = parentNode,
-                    SubnetInfo = step.TargetSubnet,
-                    Children = new List<TreeNode>()
-                };
-
-                // Avoid duplicate nodes
-                if (!allNodes.Any(n => n.NetworkInt == stepNode.NetworkInt && n.CIDR == stepNode.CIDR))
-                {
-                    parentNode.Children.Add(stepNode);
-                    allNodes.Add(stepNode);
-                }
+            // Avoid duplicate nodes by checking both network and CIDR
+            if (!allNodes.Any(n => n.NetworkInt == stepNode.NetworkInt && n.CIDR == stepNode.CIDR))
+            {
+                parentNode.Children.Add(stepNode);
+                allNodes.Add(stepNode);
             }
         }
-    }
-
-    private TreeNode? FindBestParentNode(List<TreeNode> allNodes, SubdivisionStep step)
+    }    private TreeNode? FindBestParentNode(List<TreeNode> allNodes, SubdivisionStep step)
     {
         // Find the most specific node that contains this step
+        // The parent should have a smaller CIDR (less specific) and should contain this network
         return allNodes
             .Where(n => n.CIDR < step.CIDR &&
                        IsNetworkContained(step.NetworkInt, step.CIDR, n.NetworkInt, n.CIDR))
-            .OrderByDescending(n => n.CIDR)  // Most specific first
+            .OrderByDescending(n => n.CIDR)  // Most specific (largest CIDR) first
             .FirstOrDefault();
-    }
-
-    private bool IsNetworkContained(uint childNetInt, int childCIDR, uint parentNetInt, int parentCIDR)
+    }    private bool IsNetworkContained(uint childNetInt, int childCIDR, uint parentNetInt, int parentCIDR)
     {
         if (parentCIDR >= childCIDR) return false;
         
-        var parentMask = 0xFFFFFFFF << (32 - parentCIDR);
-        var parentNetwork = parentNetInt & (uint)parentMask;
-        var childNetwork = childNetInt & (uint)parentMask;
+        var parentMask = 0xFFFFFFFFU << (32 - parentCIDR);
+        var parentNetwork = parentNetInt & parentMask;
+        var childNetwork = childNetInt & parentMask;
         
         return parentNetwork == childNetwork;
-    }
-
-    private AddressBlock? FindSourceBlock(List<AddressBlock> availableBlocks, uint subnetNetInt, int subnetCidr)
-    {
-        // Find the smallest available block that can contain this subnet
-        return availableBlocks
-            .Where(b => !b.IsAllocated && 
-                       b.NetworkInt <= subnetNetInt && 
-                       b.NetworkInt + b.Size > subnetNetInt &&
-                       b.CIDR <= subnetCidr)
-            .OrderBy(b => b.Size)
-            .FirstOrDefault();
-    }
-
-    private int CalculateAllocationLevel(int sourceCidr, int targetCidr)
-    {
-        return targetCidr - sourceCidr;
-    }
-
-    private void SplitBlock(AddressBlock sourceBlock, List<AddressBlock> availableBlocks, uint allocatedNetInt, int allocatedCidr)
-    {
-        sourceBlock.IsAllocated = true;
-        
-        // If the allocated subnet is smaller than the source block, create remaining blocks
-        if (allocatedCidr > sourceBlock.CIDR)
-        {
-            var allocatedSize = (uint)Math.Pow(2, 32 - allocatedCidr);
-            var currentPos = sourceBlock.NetworkInt;
-            var blockSize = (uint)Math.Pow(2, 32 - sourceBlock.CIDR);
-            
-            // Create blocks for the remaining address space
-            while (currentPos < sourceBlock.NetworkInt + blockSize)
-            {
-                if (currentPos == allocatedNetInt)
-                {
-                    // Skip the allocated subnet
-                    currentPos += allocatedSize;
-                }
-                else
-                {
-                    // Create available block for remaining space
-                    var remainingSize = Math.Min(allocatedSize, sourceBlock.NetworkInt + blockSize - currentPos);
-                    if (remainingSize > 0)
-                    {
-                        var remainingCidr = 32 - (int)Math.Log2(remainingSize);
-                        availableBlocks.Add(new AddressBlock
-                        {
-                            NetworkInt = currentPos,
-                            CIDR = remainingCidr,
-                            Size = remainingSize,
-                            IsAllocated = false
-                        });
-                    }
-                    currentPos += remainingSize;
-                }
-            }
-        }
     }
 
     private void DrawTreeNodes(List<TreeNode> nodes)
@@ -609,15 +523,7 @@ public class SubnetTree : Canvas
         var centerX = Math.Max(0, (Width - 400) / 2);
         var centerY = Math.Max(0, (Height - 150) / 2);
         SetLeft(errorBorder, centerX);
-        SetTop(errorBorder, centerY);
-
-        Children.Add(errorBorder);
-    }    private class AddressBlock
-    {
-        public uint NetworkInt { get; set; }
-        public int CIDR { get; set; }
-        public uint Size { get; set; }
-        public bool IsAllocated { get; set; }
+        SetTop(errorBorder, centerY);        Children.Add(errorBorder);
     }
 
     private class TreeNode
