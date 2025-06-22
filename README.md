@@ -1,4 +1,4 @@
-# VLSM Calculator Pro
+# VLSM Calculator
 
 A professional-grade Variable Length Subnet Masking (VLSM) calculator with advanced visualization capabilities, built using WPF and .NET 9. This application provides comprehensive subnet calculation, interactive network diagrams, and subnet tree visualization to help network engineers and students understand VLSM allocation strategies.
 
