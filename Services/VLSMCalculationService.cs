@@ -1,7 +1,5 @@
 using VLSMCalculator.Models;
-
 namespace VLSMCalculator.Services;
-
 public class VLSMCalculationService
 {
     public static List<SubnetInfo> GetVLSMAllocation(string baseNetwork, int baseCIDR, int[] requirements)

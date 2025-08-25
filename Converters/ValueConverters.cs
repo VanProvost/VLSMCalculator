@@ -1,7 +1,6 @@
 using System.Globalization;
 using System.Windows;
 using System.Windows.Data;
-
 namespace VLSMCalculator.Converters;
 
 public class StringToVisibilityConverter : IValueConverter

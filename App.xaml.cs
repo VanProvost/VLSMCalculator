@@ -1,6 +1,5 @@
 using System.Windows;
 using VLSMCalculator.Views;
-using System; // Add System namespace
 
 namespace VLSMCalculator
 {

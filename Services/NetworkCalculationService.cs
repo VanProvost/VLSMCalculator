@@ -1,6 +1,5 @@
 using System.Net;
 using VLSMCalculator.Models;
-
 namespace VLSMCalculator.Services;
 
 public class NetworkCalculationService

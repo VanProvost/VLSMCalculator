@@ -1,16 +1,10 @@
 using System.Windows;
-using System;
-using System.Linq;
-using System.Text;
 using System.Collections.ObjectModel;
 using VLSMCalculator.Services;
 using VLSMCalculator.Models;
 using System.Windows.Threading;
 using System.Windows.Controls;
 using System.Windows.Media;
-using System.Threading;
-using System.Threading.Tasks;
-
 namespace VLSMCalculator.Views;
 
 public partial class MainWindow : Window
